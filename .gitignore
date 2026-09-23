@@ -334,15 +334,10 @@ zzz/*
 *.lo
 
 # Compiled Dynamic libraries
-*.so
-*.so.*
-*.dylib
-*.dll
+
 
 # Executables
-*.exe
 *.out
-*.app
 *.i*86
 *.x86_64
 *.hex
@@ -635,3 +630,10 @@ tests/mariadb-client-test
 versioninfo_dll.rc
 versioninfo_exe.rc
 win/packaging/ca/symlinks.cc
+/user/_build
+
+!/user/release/
+!/user/release/*/
+!/user/release/*/*/
+!/user/release/*/*/*/
+!/user/release/*/*/*/**

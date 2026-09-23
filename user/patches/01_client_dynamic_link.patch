@@ -1,0 +1,35 @@
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index 1a56e55d5ac..8bded416405 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -33,7 +33,7 @@ INCLUDE_DIRECTORIES(BEFORE
+ ## We will need libeay32.dll and ssleay32.dll when running client executables.
+ COPY_OPENSSL_DLLS(copy_openssl_client)
+ 
+-SET(CLIENT_LIB mariadbclient mysys)
++SET(CLIENT_LIB libmariadb mysys)
+ 
+ ADD_DEFINITIONS(${SSL_DEFINES})
+ MYSQL_ADD_EXECUTABLE(mariadb completion_hash.cc mysql.cc readline.cc
+@@ -46,7 +46,7 @@ ENDIF(UNIX)
+ 
+ MYSQL_ADD_EXECUTABLE(mariadb-test mysqltest.cc ${CMAKE_SOURCE_DIR}/sql/sql_string.cc COMPONENT Test)
+ SET_SOURCE_FILES_PROPERTIES(mysqltest.cc PROPERTIES COMPILE_FLAGS "-DTHREADS ${PCRE2_DEBIAN_HACK}")
+-TARGET_LINK_LIBRARIES(mariadb-test  ${CLIENT_LIB} pcre2-posix pcre2-8)
++TARGET_LINK_LIBRARIES(mariadb-test  mariadbclient mysys pcre2-posix pcre2-8)
+ SET_TARGET_PROPERTIES(mariadb-test PROPERTIES ENABLE_EXPORTS TRUE)
+ 
+ 
+@@ -78,10 +78,10 @@ MYSQL_ADD_EXECUTABLE(mariadb-plugin mysql_plugin.c)
+ TARGET_LINK_LIBRARIES(mariadb-plugin ${CLIENT_LIB})
+ 
+ MYSQL_ADD_EXECUTABLE(mariadb-binlog mysqlbinlog.cc mysqlbinlog-engine.cc)
+-TARGET_LINK_LIBRARIES(mariadb-binlog ${CLIENT_LIB} mysys_ssl)
++TARGET_LINK_LIBRARIES(mariadb-binlog mariadbclient mysys mysys_ssl)
+ 
+ MYSQL_ADD_EXECUTABLE(mariadb-admin mysqladmin.cc ../sql/password.c)
+-TARGET_LINK_LIBRARIES(mariadb-admin ${CLIENT_LIB} mysys_ssl)
++TARGET_LINK_LIBRARIES(mariadb-admin mariadbclient mysys mysys_ssl)
+ 
+ MYSQL_ADD_EXECUTABLE(mariadb-slap mysqlslap.c)
+ SET_SOURCE_FILES_PROPERTIES(mysqlslap.c PROPERTIES COMPILE_FLAGS "-DTHREADS")
