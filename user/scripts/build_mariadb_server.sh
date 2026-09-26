@@ -94,8 +94,11 @@ tree's CMakeLists.txt/cmake/*.cmake, not assumed): cmake, a C/C++ toolchain, bis
 curses/readline development headers (MYSQL_CHECK_READLINE calls FIND_PACKAGE(Curses
 REQUIRED) unconditionally for the mariadb/mysql CLI client -- e.g. libncurses-dev on
 Debian/Ubuntu, ncurses-devel on Fedora/RHEL, ncurses via Homebrew on mac), and on Windows, a
-working mingw-w64 cross toolchain. Unlike OpenSSL, these are ordinary build tools available
-via every platform's normal package manager, not something this repo vendors itself.
+Visual Studio install with the "C++ CMake tools for Windows" component (this script drives
+MSVC via vcvarsall.bat, matching this repo's dolphin/dolphinrvz build -- see
+build_one_windows_msvc below) plus bison reachable on PATH from wherever it's installed (e.g.
+MSYS2's usr/bin). Unlike OpenSSL, these are ordinary build tools available via every
+platform's normal package manager, not something this repo vendors itself.
 
 Disabled up front, on every platform, because their nested git submodules are not checked
 out in this tree (see submodules/mariadb-server/.gitmodules): the RocksDB, ColumnStore, S3
@@ -138,10 +141,6 @@ else
         *) log_line ERROR "Unsupported host OS: ${host_os}. Use --platform to select a target explicitly."; exit 2 ;;
     esac
     log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
-fi
-
-if [ "${PLATFORM}" = "windows" ]; then
-    log_line WARN "MariaDB server's Windows support historically targets MSVC; this script builds it with a mingw-w64 toolchain (for consistency with this repo's other Windows builds) which is comparatively untested upstream. Expect to iterate here."
 fi
 
 for tool in cmake bison; do
@@ -443,12 +442,140 @@ build_mac() {
     build_one mac arm64 "-DCMAKE_OSX_ARCHITECTURES=arm64"
 }
 
+# Locates the Visual Studio install root for the native-Windows MSVC build below. Same
+# mechanism as submodules/dolphin/user/scripts/build_dolphin_rvz.sh's find_vs_root() (and its
+# copies in ../../openssl and ../../mariadb-connector-c's build scripts) -- duplicated here
+# rather than shared, matching this repo's existing convention of self-contained build
+# scripts (no common/lib file; log_line/run_and_log are duplicated the same way already).
+find_vs_root() {
+    vs_root="${VS_INSTALL_DIR:-C:\\Visual Studio\\18\\Community}"
+
+    if [ ! -f "$(cygpath -u "${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat")" ]; then
+        vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+        if [ -f "${vswhere}" ]; then
+            found_root=$("${vswhere}" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>/dev/null | tr -d '\r')
+            [ -n "${found_root}" ] && vs_root="${found_root}"
+        fi
+    fi
+
+    if [ ! -f "$(cygpath -u "${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat")" ]; then
+        log_line ERROR "Visual Studio install not found. Set VS_INSTALL_DIR to your install root, e.g. VS_INSTALL_DIR='C:\\Visual Studio\\18\\Community'"
+        return 1
+    fi
+
+    printf '%s' "${vs_root}"
+}
+
+# Rewrites any -Dkey=/posix/path token (e.g. ssl_defs_for's -DOPENSSL_INCLUDE_DIR=/d/...) to
+# its native Windows form. Needed only for the MSVC batch-file path below: those defs get
+# embedded as literal text in a .bat file run by the VS-bundled (non-MSYS) cmake.exe, which
+# has no concept of MSYS2's /d/... drive-mount notation, unlike a bare argv bash hands an
+# .exe directly (which MSYS2 auto-translates). Non-path tokens pass through unchanged.
+winpathify_defs() {
+    result=""
+    for tok in $1; do
+        case "${tok}" in
+            *=/*)
+                key="${tok%%=*}"
+                val="${tok#*=}"
+                val=$(cygpath -w "${val}" 2>/dev/null || printf '%s' "${val}")
+                tok="${key}=${val}"
+                ;;
+        esac
+        result="${result} ${tok}"
+    done
+    printf '%s' "${result# }"
+}
+
+# Configure+build+install run inside ONE batch file after `call vcvarsall.bat`, same
+# confirmed-by-testing reason as dolphin's build script (see its comments): bash-exported
+# INCLUDE/LIB/LIBPATH stop reaching link.exe several process-hops down the bash -> cmake.exe
+# -> ninja.exe -> cmd.exe -> link.exe chain. PATH is reset to a clean, MSYS2-free base (plus
+# bison's own dir, which mariadbd's build needs at configure/build time to generate
+# sql/sql_yacc.cc -- nothing else here calls out to posix tools) before calling vcvarsall.bat,
+# so CMake's find_package/find_library machinery can't pick up MinGW-targeted "system" libs
+# reachable only via mingw64/bin's pkg-config.exe -- confirmed to actually happen (not just
+# theoretical) building dolphin/dolphinrvz this same way.
+build_one_windows_msvc() {
+    extra_defs="$1"
+    platform_name="windows"
+    arch_name="x64"
+
+    build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
+    stage_dir="${STAGE_ROOT}/${platform_name}-${arch_name}"
+    wintemp_dir="${BUILD_ROOT}/_wintemp"
+    rm -rf "${build_dir}" "${stage_dir}"
+    mkdir -p "${build_dir}" "${stage_dir}" "${wintemp_dir}"
+
+    ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
+    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
+    defs=$(winpathify_defs "${defs}")
+
+    vs_root=$(find_vs_root) || return 1
+    vcvarsall="${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat"
+    vs_cmake_dir="${vs_root}\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin"
+    vs_ninja_dir="${vs_root}\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja"
+    vs_cmake_exe="${vs_cmake_dir}\\cmake.exe"
+    vs_ninja_exe="${vs_ninja_dir}\\ninja.exe"
+    [ -f "$(cygpath -u "${vs_cmake_exe}")" ] || { log_line ERROR "VS-bundled cmake.exe not found: ${vs_cmake_exe} (needs the \"C++ CMake tools for Windows\" component)"; return 1; }
+    [ -f "$(cygpath -u "${vs_ninja_exe}")" ] || { log_line ERROR "VS-bundled ninja.exe not found: ${vs_ninja_exe} (needs the \"C++ CMake tools for Windows\" component)"; return 1; }
+
+    native_bison=$(command -v bison) || { log_line ERROR "bison not found on PATH (needed to generate sql/sql_yacc.cc)."; return 1; }
+    bison_dir=$(cygpath -w "$(dirname "${native_bison}")")
+
+    win_root_dir=$(cygpath -w "${ROOT_DIR}")
+    win_build_dir=$(cygpath -w "${build_dir}")
+    win_stage_dir=$(cygpath -w "${stage_dir}")
+    win_tmp_dir=$(cygpath -w "${wintemp_dir}")
+
+    log_line INFO "Using MSVC via: ${vcvarsall}"
+    log_line INFO "Configuring ${platform_name}/${arch_name} (MSVC/Ninja)"
+
+    tmp_bat=$(mktemp --suffix=.bat)
+    win_tmp_bat=$(cygpath -w "${tmp_bat}")
+    {
+        echo "@echo off"
+        echo "set \"PATH=C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Windows\\System32\\OpenSSH;${bison_dir};${vs_cmake_dir};${vs_ninja_dir}\""
+        # TMP/TEMP overridden to an ordinary disk-backed directory: cl.exe writes scratch
+        # files there during compilation, and this call's own ambient TMP/TEMP -- unlike PATH,
+        # not touched by the reset above -- can be pointed anywhere by the calling environment
+        # (confirmed directly, on ../../openssl's build: a RAM-disk-backed TMP/TEMP reliably
+        # crashed cl.exe's very first invocation of a from-scratch build with "Command line
+        # error D8050: cannot execute '...\c1.dll': failed to get command line into debug
+        # records", gone completely once TMP/TEMP pointed at a normal directory instead).
+        echo "set \"TMP=${win_tmp_dir}\""
+        echo "set \"TEMP=${win_tmp_dir}\""
+        echo "call \"${vcvarsall}\" x64 >nul 2>&1"
+        echo "echo [INFO] Configuring ..."
+        # shellcheck disable=SC2086
+        echo "\"${vs_cmake_exe}\" -S \"${win_root_dir}\" -B \"${win_build_dir}\" -G Ninja -DCMAKE_MAKE_PROGRAM=\"${vs_ninja_exe}\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ${defs}"
+        echo "if errorlevel 1 exit /b 1"
+        echo "echo [INFO] Building ..."
+        echo "\"${vs_cmake_exe}\" --build \"${win_build_dir}\" --config RelWithDebInfo -j${JOBS}"
+        echo "if errorlevel 1 exit /b 1"
+        echo "echo [INFO] Installing ..."
+        echo "\"${vs_cmake_exe}\" --install \"${win_build_dir}\" --prefix \"${win_stage_dir}\""
+    } > "${tmp_bat}"
+
+    rc=0
+    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
+    MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "${win_tmp_bat}" < /dev/null > "${tmp_log}" 2>&1 || rc=$?
+    cat "${tmp_log}" | tee -a "${LOG_FILE}"
+    rm -f "${tmp_log}" "${tmp_bat}"
+    if [ "${rc}" -ne 0 ]; then
+        log_line ERROR "Windows MSVC configure/build/install failed (exit ${rc})."
+        return "${rc}"
+    fi
+
+    collect_artifacts "${stage_dir}" "${platform_name}" "${arch_name}" "${defs}"
+}
+
 build_windows() {
     log_line INFO "Starting windows/x64 build"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-            log_line INFO "Native Windows host detected; using host MinGW-w64 toolchain directly."
-            build_one windows x64 ""
+            log_line INFO "Native Windows host detected; building with MSVC via vcvarsall, matching this repo's dolphin/dolphinrvz build."
+            build_one_windows_msvc ""
             return $?
             ;;
     esac
