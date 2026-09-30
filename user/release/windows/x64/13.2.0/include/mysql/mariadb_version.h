@@ -29,8 +29,8 @@
 #define MARIADB_PACKAGE_VERSION "3.4.10"
 #define MARIADB_PACKAGE_VERSION_ID 30410
 #define MARIADB_SYSTEM_TYPE "Windows"
-#define MARIADB_MACHINE_TYPE "AMD64"
-#define MARIADB_PLUGINDIR "C:/Program Files (x86)/MariaDB/lib/plugin"
+#define MARIADB_MACHINE_TYPE ""
+#define MARIADB_PLUGINDIR "C:/Program Files/MariaDB/lib/plugin"
 
 /* mysqld compile time options */
 #ifndef MYSQL_CHARSET

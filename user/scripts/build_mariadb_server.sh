@@ -5,10 +5,15 @@
 # user/release/<platform>/<arch>/<version>/{bin,shared,include}, and scratch/build state
 # lives under user/_build (not user/release).
 #
-# ios/android are refused outright, not attempted: mariadbd is a network daemon (listening
-# sockets, forked/threaded connection handling, a filesystem-backed data directory) with no
-# officially supported mobile-app-sandbox build, unlike the client libraries
-# (openssl/mariadb-connector-c) this same repo does build for those platforms.
+# ios/android are placeholders: accepted as targets so the matrix is complete, but they exit
+# 2 with "not implemented yet" rather than attempting a build. mariadbd is a network daemon
+# (listening sockets, forked/threaded connection handling, a filesystem-backed data
+# directory) with no officially supported mobile-app-sandbox build, unlike the client
+# libraries (openssl/mariadb-connector-c) this same repo does build for those platforms.
+#
+# Cross builds: linux/arm64 from an x86_64 host runs MariaDB's generated build tools through
+# qemu (CMAKE_CROSSCOMPILING_EMULATOR); windows/arm64 from an x64 host builds those tools for
+# x64 first and imports them (IMPORT_EXECUTABLES), since nothing can run arm64 code there.
 #
 # Almost no source patch is needed. Every option this script sets -- PLUGIN_<NAME>=NO,
 # WITH_WSREP=OFF, WITH_SSL=<path>, CMAKE_COMPILE_WARNING_AS_ERROR=OFF -- is a first-class
@@ -41,6 +46,7 @@ LOG_DIR="${USER_DIR}/logs"
 
 PLATFORM=""
 PLATFORM_SET=0
+ARCH=""
 CLEAN=1
 VERSION_OVERRIDE=""
 
@@ -76,7 +82,8 @@ Usage:
   sh user/scripts/build_mariadb_server.sh [options]
 
 Options:
-  --platform <linux|mac|windows>   (ios/android are refused -- see this file's header)
+  --platform <linux|mac|windows|ios|android>   (ios/android are placeholders -- see header)
+  --arch <x64|arm64>   linux/windows only (default: the host's); mac is arm64
   --clean | --no-clean
   --version <value>
   --help
@@ -86,6 +93,9 @@ Environment variables:
                        (.../<platform>/<arch>/<version>), i.e. build that submodule first.
                        Never falls back to a system-installed OpenSSL.
   WINDOWS_TOOLCHAIN_FILE   Required for --platform windows on a non-Windows host
+  LINUX_ARM64_CROSS_PREFIX linux/arm64 cross prefix from a non-arm64 host (default:
+                       aarch64-linux-gnu-; also needs qemu-aarch64 and libncurses-dev:arm64)
+  LINUX_ARM64_TOOLCHAIN_FILE  Alternative to the above: a complete toolchain file
   JOBS                Optional build parallelism (default: host CPU count)
 
 Host prerequisites this script does not install for you (all confirmed against this exact
@@ -113,6 +123,9 @@ while [ "$#" -gt 0 ]; do
         --platform)
             [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --platform"; exit 2; }
             PLATFORM="$2"; PLATFORM_SET=1; shift 2 ;;
+        --arch)
+            [ "$#" -ge 2 ] || { log_line ERROR "Missing value for --arch"; exit 2; }
+            ARCH="$2"; shift 2 ;;
         --clean) CLEAN=1; shift ;;
         --no-clean) CLEAN=0; shift ;;
         --version)
@@ -127,7 +140,7 @@ if [ "${PLATFORM_SET}" -eq 1 ]; then
     case "${PLATFORM}" in
         linux|mac|windows) ;;
         ios|android)
-            log_line ERROR "--platform ${PLATFORM} is not supported for mariadb-server: mariadbd is a network daemon (listening sockets, a filesystem data directory, forked/threaded connection handling) with no officially supported mobile build -- unlike this repo's openssl/mariadb-connector-c builds, which do target ${PLATFORM}."
+            log_line ERROR "--platform ${PLATFORM}/arm64 is a placeholder, not implemented yet: mariadbd is a network daemon (listening sockets, a filesystem data directory, forked/threaded connection handling) with no officially supported mobile build -- unlike this repo's openssl/mariadb-connector-c builds, which do target ${PLATFORM}."
             exit 2
             ;;
         *) log_line ERROR "Invalid --platform value: ${PLATFORM}"; exit 2 ;;
@@ -142,6 +155,22 @@ else
     esac
     log_line INFO "Auto-detected host platform '${PLATFORM}' from '${host_os}'."
 fi
+
+case "$(uname -m)" in
+    arm64|aarch64) HOST_ARCH="arm64" ;;
+    *) HOST_ARCH="x64" ;;
+esac
+case "${ARCH}" in
+    "") case "${PLATFORM}" in mac) ARCH="arm64" ;; *) ARCH="${HOST_ARCH}" ;; esac ;;
+    x64|arm64) ;;
+    aarch64) ARCH="arm64" ;;
+    x86_64|amd64) ARCH="x64" ;;
+    *) log_line ERROR "Invalid --arch value: ${ARCH} (expected x64 or arm64)"; exit 2 ;;
+esac
+case "${PLATFORM}/${ARCH}" in
+    mac/arm64|linux/x64|linux/arm64|windows/x64|windows/arm64) ;;
+    *) log_line ERROR "Unsupported target ${PLATFORM}/${ARCH}. Supported: mac/arm64 linux/x64 linux/arm64 windows/x64 windows/arm64"; exit 2 ;;
+esac
 
 for tool in cmake bison; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -381,6 +410,17 @@ mariadb-install-db mariadb mariadb-dump mariadb-show mariadb-check"
         cp -R "${stage_dir}/include/." "${out_include}/"
     fi
 
+    # share/ (errmsg.sys per language, charsets, the bootstrap SQL) is what mariadbd needs to
+    # create a datadir at all. It used to live only in the scratch stage under _build/, and a
+    # clean build of any other platform/arch wipes _build/ -- so building windows/arm64 after
+    # windows/x64 silently took the x64 share/ with it, and the next deploy had none.
+    # Promoted here, beside bin/ and shared/, where move_libs_to_app_root.sh looks first.
+    if [ -d "${stage_dir}/share" ]; then
+        rm -rf "${out_base}/share"
+        mkdir -p "${out_base}/share"
+        cp -R "${stage_dir}/share/." "${out_base}/share/"
+    fi
+
     {
         echo "timestamp=${TIMESTAMP}"
         echo "platform=${platform_name}"
@@ -433,8 +473,34 @@ build_one() {
 }
 
 build_linux() {
+    [ "${ARCH}" = "arm64" ] && { build_linux_arm64; return $?; }
     log_line INFO "Starting linux/x64 build"
     build_one linux x64 ""
+}
+
+# linux/arm64: native on an aarch64 Linux host. Otherwise the GNU aarch64 cross compilers,
+# with the find root pointed at their sysroot (so the x86_64 host's /usr/lib is never picked
+# up; curses then has to be the arm64 multiarch package), and qemu-aarch64 as the emulator
+# for the tools the build generates and runs -- MariaDB's CMakeLists skips
+# IMPORT_EXECUTABLES when an emulator is defined.
+build_linux_arm64() {
+    log_line INFO "Starting linux/arm64 build"
+    extra=""
+    if [ -n "${LINUX_ARM64_TOOLCHAIN_FILE:-}" ]; then
+        [ -f "${LINUX_ARM64_TOOLCHAIN_FILE}" ] || { log_line ERROR "LINUX_ARM64_TOOLCHAIN_FILE does not exist: ${LINUX_ARM64_TOOLCHAIN_FILE}"; return 1; }
+        extra="-DCMAKE_TOOLCHAIN_FILE=${LINUX_ARM64_TOOLCHAIN_FILE}"
+    elif [ "$(uname -s)" != "Linux" ] || [ "${HOST_ARCH}" != "arm64" ] || [ -n "${LINUX_ARM64_CROSS_PREFIX:-}" ]; then
+        prefix="${LINUX_ARM64_CROSS_PREFIX:-aarch64-linux-gnu-}"
+        triple="${prefix%-}"
+        command -v "${prefix}g++" >/dev/null 2>&1 || { log_line ERROR "${prefix}g++ not found. Install g++-aarch64-linux-gnu (or set LINUX_ARM64_TOOLCHAIN_FILE)."; return 1; }
+        command -v qemu-aarch64 >/dev/null 2>&1 || { log_line ERROR "qemu-aarch64 not found. Install qemu-user: the build runs its own generated tools."; return 1; }
+        # CMake's FindCurses looks in /usr/lib/<triple>; with the find root restricted to the
+        # cross sysroot, point it there explicitly.
+        curses_lib="/usr/lib/${triple}/libncurses.so"
+        [ -e "${curses_lib}" ] || { log_line ERROR "${curses_lib} not found. Install libncurses-dev:arm64 (dpkg --add-architecture arm64 first)."; return 1; }
+        extra="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=${prefix}gcc -DCMAKE_CXX_COMPILER=${prefix}g++ -DCMAKE_FIND_ROOT_PATH=/usr/${triple};/usr/lib/${triple} -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_LIBRARY_ARCHITECTURE=${triple} -DCMAKE_CROSSCOMPILING_EMULATOR=qemu-aarch64;-L;/usr/${triple} -DCURSES_LIBRARY=${curses_lib} -DCURSES_INCLUDE_PATH=/usr/include"
+    fi
+    build_one linux arm64 "${extra}"
 }
 
 build_mac() {
@@ -499,17 +565,13 @@ winpathify_defs() {
 build_one_windows_msvc() {
     extra_defs="$1"
     platform_name="windows"
-    arch_name="x64"
+    arch_name="${ARCH}"
 
     build_dir="${BUILD_ROOT}/${platform_name}/${arch_name}"
     stage_dir="${STAGE_ROOT}/${platform_name}-${arch_name}"
     wintemp_dir="${BUILD_ROOT}/_wintemp"
     rm -rf "${build_dir}" "${stage_dir}"
     mkdir -p "${build_dir}" "${stage_dir}" "${wintemp_dir}"
-
-    ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
-    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
-    defs=$(winpathify_defs "${defs}")
 
     vs_root=$(find_vs_root) || return 1
     vcvarsall="${vs_root}\\VC\\Auxiliary\\Build\\vcvarsall.bat"
@@ -524,13 +586,60 @@ build_one_windows_msvc() {
     bison_dir=$(cygpath -w "$(dirname "${native_bison}")")
 
     win_root_dir=$(cygpath -w "${ROOT_DIR}")
-    win_build_dir=$(cygpath -w "${build_dir}")
-    win_stage_dir=$(cygpath -w "${stage_dir}")
     win_tmp_dir=$(cygpath -w "${wintemp_dir}")
 
     log_line INFO "Using MSVC via: ${vcvarsall}"
-    log_line INFO "Configuring ${platform_name}/${arch_name} (MSVC/Ninja)"
 
+    # arm64 from an x64 host is a real cross build: the build runs its own generated tools
+    # (comp_err, gen_lex_hash, ...) and an x64 machine cannot execute arm64 ones. MariaDB's
+    # answer is IMPORT_EXECUTABLES -- build just those tools natively first (the
+    # `import_executables` target) and hand the cross build the exported .cmake file.
+    cross_defs=""
+    case "${ARCH}" in
+        x64) vcvars_arch="x64" ;;
+        arm64)
+            if [ "${PROCESSOR_ARCHITECTURE:-}" = "ARM64" ]; then
+                vcvars_arch="arm64"
+            else
+                vcvars_arch="x64_arm64"
+                host_dir="${BUILD_ROOT}/${platform_name}/x64-host-tools"
+                rm -rf "${host_dir}"
+                mkdir -p "${host_dir}"
+                # The x64 OpenSSL build, not the arm64 one in OPENSSL_ROOT_DIR: these tools
+                # are linked and run on this machine. $(...) keeps the override local.
+                host_ssl_defs=$(OPENSSL_ROOT_DIR="" ssl_defs_for "${platform_name}" x64) || {
+                    log_line ERROR "windows/arm64 needs the windows/x64 OpenSSL build too, for its host tools. Build it first: build_openssl.sh --platform windows --arch x64"
+                    return 1
+                }
+                host_defs=$(winpathify_defs "${COMMON_DEFS} ${host_ssl_defs}")
+                log_line INFO "Building x64 host tools (import_executables) for the arm64 cross build"
+                msvc_batch x64 "${host_dir}" "" "${host_defs}" import_executables || {
+                    log_line ERROR "Building the x64 host tools failed."
+                    return 1
+                }
+                cross_defs="-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64 -DIMPORT_EXECUTABLES=$(cygpath -m "${host_dir}/import_executables.cmake")"
+            fi
+            ;;
+    esac
+
+    ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
+    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") ${ssl_defs} ${cross_defs} ${extra_defs}"
+    defs=$(winpathify_defs "${defs}")
+
+    log_line INFO "Configuring ${platform_name}/${arch_name} (MSVC/Ninja, vcvarsall ${vcvars_arch})"
+    msvc_batch "${vcvars_arch}" "${build_dir}" "${stage_dir}" "${defs}" "" || {
+        log_line ERROR "Windows MSVC configure/build/install failed (exit ${rc})."
+        return "${rc}"
+    }
+
+    collect_artifacts "${stage_dir}" "${platform_name}" "${arch_name}" "${defs}"
+}
+
+# One vcvars-initialised cmd.exe session: configure, build (all, or $5 if given), and install
+# into $3 unless it is empty. $1 = vcvarsall arch, $2 = build dir, $4 = CMake defs.
+msvc_batch() {
+    b_vcvars="$1"; b_build="$2"; b_stage="$3"; b_defs="$4"; b_target="$5"
+    win_b_build=$(cygpath -w "${b_build}")
     tmp_bat=$(mktemp --suffix=.bat)
     win_tmp_bat=$(cygpath -w "${tmp_bat}")
     {
@@ -545,16 +654,24 @@ build_one_windows_msvc() {
         # records", gone completely once TMP/TEMP pointed at a normal directory instead).
         echo "set \"TMP=${win_tmp_dir}\""
         echo "set \"TEMP=${win_tmp_dir}\""
-        echo "call \"${vcvarsall}\" x64 >nul 2>&1"
+        echo "call \"${vcvarsall}\" ${b_vcvars} >nul 2>&1"
         echo "echo [INFO] Configuring ..."
         # shellcheck disable=SC2086
-        echo "\"${vs_cmake_exe}\" -S \"${win_root_dir}\" -B \"${win_build_dir}\" -G Ninja -DCMAKE_MAKE_PROGRAM=\"${vs_ninja_exe}\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ${defs}"
+        echo "\"${vs_cmake_exe}\" -S \"${win_root_dir}\" -B \"${win_b_build}\" -G Ninja -DCMAKE_MAKE_PROGRAM=\"${vs_ninja_exe}\" -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ${b_defs}"
         echo "if errorlevel 1 exit /b 1"
         echo "echo [INFO] Building ..."
-        echo "\"${vs_cmake_exe}\" --build \"${win_build_dir}\" --config RelWithDebInfo -j${JOBS}"
+        if [ -n "${b_target}" ]; then
+            echo "\"${vs_cmake_exe}\" --build \"${win_b_build}\" --config RelWithDebInfo --target ${b_target} -j${JOBS}"
+        else
+            echo "\"${vs_cmake_exe}\" --build \"${win_b_build}\" --config RelWithDebInfo -j${JOBS}"
+        fi
         echo "if errorlevel 1 exit /b 1"
-        echo "echo [INFO] Installing ..."
-        echo "\"${vs_cmake_exe}\" --install \"${win_build_dir}\" --prefix \"${win_stage_dir}\""
+        if [ -n "${b_stage}" ]; then
+            echo "echo [INFO] Installing ..."
+            echo "\"${vs_cmake_exe}\" --install \"${win_b_build}\" --prefix \"$(cygpath -w "${b_stage}")\""
+            echo "if errorlevel 1 exit /b 1"
+        fi
+        echo "exit /b 0"
     } > "${tmp_bat}"
 
     rc=0
@@ -562,16 +679,11 @@ build_one_windows_msvc() {
     MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "${win_tmp_bat}" < /dev/null > "${tmp_log}" 2>&1 || rc=$?
     cat "${tmp_log}" | tee -a "${LOG_FILE}"
     rm -f "${tmp_log}" "${tmp_bat}"
-    if [ "${rc}" -ne 0 ]; then
-        log_line ERROR "Windows MSVC configure/build/install failed (exit ${rc})."
-        return "${rc}"
-    fi
-
-    collect_artifacts "${stage_dir}" "${platform_name}" "${arch_name}" "${defs}"
+    return "${rc}"
 }
 
 build_windows() {
-    log_line INFO "Starting windows/x64 build"
+    log_line INFO "Starting windows/${ARCH} build"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
             log_line INFO "Native Windows host detected; building with MSVC via vcvarsall, matching this repo's dolphin/dolphinrvz build."
@@ -579,6 +691,10 @@ build_windows() {
             return $?
             ;;
     esac
+    if [ "${ARCH}" = "arm64" ]; then
+        log_line ERROR "windows/arm64 is built with MSVC on a Windows host only; cross-building it is not wired up."
+        return 1
+    fi
     if [ -z "${WINDOWS_TOOLCHAIN_FILE:-}" ]; then
         log_line ERROR "WINDOWS_TOOLCHAIN_FILE is not set (required to cross-compile windows/x64 from a non-Windows host)."
         return 1
@@ -589,9 +705,9 @@ build_windows() {
 
 failures=""
 case "${PLATFORM}" in
-    linux) build_linux || failures="${failures} linux/x64" ;;
+    linux) build_linux || failures="${failures} linux/${ARCH}" ;;
     mac) build_mac || failures="${failures} mac/arm64" ;;
-    windows) build_windows || failures="${failures} windows/x64" ;;
+    windows) build_windows || failures="${failures} windows/${ARCH}" ;;
 esac
 
 if [ -n "${failures}" ]; then
@@ -600,6 +716,6 @@ if [ -n "${failures}" ]; then
     exit 1
 fi
 
-log_line INFO "Build completed successfully for: ${PLATFORM}"
+log_line INFO "Build completed successfully for: ${PLATFORM}/${ARCH}"
 log_line INFO "Release root: ${RELEASE_DIR}"
 log_line INFO "Log file: ${LOG_FILE}"

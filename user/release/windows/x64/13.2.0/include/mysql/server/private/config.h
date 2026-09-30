@@ -383,7 +383,7 @@
 #define STACK_DIRECTION -1
 
 #define SYSTEM_TYPE "Win64"
-#define MACHINE_TYPE "AMD64"
+#define MACHINE_TYPE ""
 #define DEFAULT_MACHINE "x64"
 /* #undef HAVE_DTRACE */
 
