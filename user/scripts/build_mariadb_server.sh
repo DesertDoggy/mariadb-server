@@ -220,7 +220,7 @@ else
         ' "${ROOT_DIR}/VERSION" 2>/dev/null
     )
     if [ -z "${VERSION}" ]; then
-        VERSION=$(git -C "${ROOT_DIR}" describe --tags --always 2>/dev/null || date +%Y%m%d)
+        VERSION=$(git -C "${ROOT_DIR}" describe --tags 2>/dev/null || date +%Y%m%d-%H%M%S)
         log_line FALLBACK "Could not read VERSION. Using ${VERSION}."
     else
         log_line INFO "Using repo version: ${VERSION}"
