@@ -639,3 +639,4 @@ win/packaging/ca/symlinks.cc
 !/user/release/*/*/*/**
 user/release/linux/x64/13.2.0/bin/mariadbd
 user/release/linux/x64/13.2.0/bin/mariadbd
+/user/release
