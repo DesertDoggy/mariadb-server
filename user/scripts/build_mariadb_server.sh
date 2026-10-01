@@ -66,11 +66,14 @@ log_line() {
 
 run_and_log() {
     log_line INFO "RUN: $*"
-    tmp_log="${LOG_DIR}/.cmd-$$-$(date +%s).log"
-    rc=0
-    "$@" > "${tmp_log}" 2>&1 || rc=$?
-    cat "${tmp_log}" | tee -a "${LOG_FILE}"
-    rm -f "${tmp_log}"
+    # Streamed, not buffered until the command ends: a twenty-minute build that prints
+    # nothing looks exactly like a hang, and scripts/build_native_deps.sh shows the newest
+    # log line as progress. POSIX sh has no pipefail, so the status crosses the pipe in a file.
+    rc_file="${LOG_DIR}/.rc-$$"
+    rm -f "${rc_file}"
+    { rc=0; "$@" 2>&1 || rc=$?; echo "${rc}" > "${rc_file}"; } | tee -a "${LOG_FILE}"
+    rc=$(cat "${rc_file}" 2>/dev/null || echo 1)
+    rm -f "${rc_file}"
     [ "${rc}" -eq 0 ] && return 0
     log_line ERROR "Command failed (exit=${rc}): $*"
     return "${rc}"
@@ -172,6 +175,31 @@ case "${PLATFORM}/${ARCH}" in
     *) log_line ERROR "Unsupported target ${PLATFORM}/${ARCH}. Supported: mac/arm64 linux/x64 linux/arm64 windows/x64 windows/arm64"; exit 2 ;;
 esac
 
+# Whether the bison on PATH is >= 2.4, the minimum sql/CMakeLists.txt accepts.
+bison_ok() {
+    v=$(bison --version 2>/dev/null | sed -n '1s/.* //p')
+    major=${v%%.*}; minor=${v#*.}; minor=${minor%%.*}
+    case "${major}${minor}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${major}" -gt 2 ] || { [ "${major}" -eq 2 ] && [ "${minor}" -ge 4 ]; }
+}
+
+# macOS ships bison 2.3 in /usr/bin and Homebrew's bison is keg-only, so it is installed but
+# never on PATH; without this, configure runs for minutes and then fails on "Found unsuitable
+# version 2.3".
+if [ "$(uname -s)" = "Darwin" ] && ! bison_ok; then
+    for d in "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/bison/bin" /opt/homebrew/opt/bison/bin /usr/local/opt/bison/bin; do
+        if [ -x "${d}/bison" ]; then
+            PATH="${d}:${PATH}"; export PATH
+            log_line INFO "Using Homebrew bison: ${d}/bison"
+            break
+        fi
+    done
+fi
+if command -v bison >/dev/null 2>&1 && ! bison_ok; then
+    log_line ERROR "bison at $(command -v bison) is older than 2.4 ($(bison --version | sed -n '1p')). Install a newer one (mac: brew install bison) and retry."
+    exit 2
+fi
+
 for tool in cmake bison; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         log_line ERROR "${tool} was not found. Install it and retry (bison must be >= 2.4; there is no pre-generated sql/sql_yacc.cc committed to this tree)."
@@ -214,18 +242,23 @@ JOBS=${JOBS:-${JOBS_DEFAULT}}
 # modified in `git status` inside submodules/mariadb-server after a build; that's expected,
 # not a bug -- revert with a plain file edit or `git checkout -- <file>` yourself if you want
 # a clean checkout (this script never runs git). Idempotent: a dry-run first, in both
-# directions, so re-running this script on an already-patched tree is a no-op, not a failure.
+# directions, so re-running this script on an already-patched tree is a no-op, not a failure
+# (and not a prompt -- see the -f note below).
 apply_patches() {
     patch_dir="${USER_DIR}/patches"
     [ -d "${patch_dir}" ] || return 0
     for p in "${patch_dir}"/*.patch; do
         [ -e "${p}" ] || continue
         name=$(basename "${p}")
-        if (cd "${ROOT_DIR}" && patch -p1 --dry-run < "${p}") >/dev/null 2>&1; then
-            (cd "${ROOT_DIR}" && patch -p1 < "${p}")
-            log_line INFO "Applied patch: ${name}"
-        elif (cd "${ROOT_DIR}" && patch -p1 -R --dry-run < "${p}") >/dev/null 2>&1; then
+        # Reverse first, and always -f: on an already-patched tree a plain forward dry-run
+        # makes patch ask "Reversed (or previously applied) patch detected! Assume -R? [y]" on
+        # /dev/tty -- invisible here (output is discarded) and it waits forever. Seen with
+        # Apple's patch 2.0 on mac; answering it would have gone on to *un*apply the patch.
+        if (cd "${ROOT_DIR}" && patch -p1 -R -f --dry-run < "${p}") >/dev/null 2>&1; then
             log_line INFO "Patch already applied: ${name}"
+        elif (cd "${ROOT_DIR}" && patch -p1 -N -f --dry-run < "${p}") >/dev/null 2>&1; then
+            (cd "${ROOT_DIR}" && patch -p1 -N -f < "${p}")
+            log_line INFO "Applied patch: ${name}"
         else
             log_line ERROR "Patch ${name} does not apply (forward or reverse) -- this tree's client/CMakeLists.txt may have changed upstream. Manual merge needed."
             return 1
@@ -342,6 +375,19 @@ COMMON_DEFS="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_COMPILE_WARNING_AS_ERROR=
 -DWITH_WSREP=OFF -DWITH_UNIT_TESTS=OFF -DWITH_EMBEDDED_SERVER=OFF \
 ${UNUSED_STORAGE_ENGINES} ${TEST_AND_EXAMPLE_PLUGINS} ${OPTIONAL_PLUGINS}"
 
+# mac only: CMake searches /opt/homebrew (and /usr/local) by default, so whichever of
+# zstd/lz4/... the build machine happens to have from Homebrew gets linked by absolute path
+# -- seen as zstd.so -> /opt/homebrew/opt/zstd/lib/libzstd.1.dylib and provider_lz4.so ->
+# .../liblz4.1.dylib. Those plugins then exist or not depending on the machine, and fail to
+# load anywhere else. Ignoring the prefixes makes the build see only the SDK and what this
+# script hands it explicitly (OpenSSL). Tools found through PATH (bison) are unaffected.
+homebrew_isolation_defs_for() {
+    case "$1" in
+        mac) printf '%s' "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
 collect_artifacts() {
     stage_dir="$1"
     platform_name="$2"
@@ -448,7 +494,7 @@ build_one() {
     mkdir -p "${build_dir}" "${stage_dir}"
 
     ssl_defs=$(ssl_defs_for "${platform_name}" "${arch_name}") || return 1
-    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
+    defs="${COMMON_DEFS} $(rpath_defs_for "${platform_name}") $(homebrew_isolation_defs_for "${platform_name}") ${ssl_defs} ${extra_defs}"
 
     log_line INFO "Configuring ${platform_name}/${arch_name}"
     # shellcheck disable=SC2086

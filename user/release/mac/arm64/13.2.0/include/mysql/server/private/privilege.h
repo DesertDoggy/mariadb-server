@@ -1,0 +1,969 @@
+#ifndef PRIVILEGE_H_INCLUDED
+#define PRIVILEGE_H_INCLUDED
+
+/* Copyright (c) 2020, MariaDB Corporation.
+
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation; version 2 of the License.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
+
+#include "my_global.h" // ulonglong
+#include "my_bit.h"    //my_bit_log2_uint64
+
+/*
+  A strict enum to store privilege bits.
+
+  We should eventually make if even stricter using "enum class privilege_t" and:
+  - Replace all code pieces like `if (priv)` to `if (priv != NO_ACL)`
+  - Remove "delete" comparison operators below
+*/
+enum privilege_t: unsigned long long
+{
+  NO_ACL                = (0),
+  SELECT_ACL            = (1UL << 0),
+  INSERT_ACL            = (1UL << 1),
+  UPDATE_ACL            = (1UL << 2),
+  DELETE_ACL            = (1UL << 3),
+  CREATE_ACL            = (1UL << 4),
+  DROP_ACL              = (1UL << 5),
+  RELOAD_ACL            = (1UL << 6),
+  SHUTDOWN_ACL          = (1UL << 7),
+  PROCESS_ACL           = (1UL << 8),
+  FILE_ACL              = (1UL << 9),
+  GRANT_ACL             = (1UL << 10),
+  REFERENCES_ACL        = (1UL << 11),
+  INDEX_ACL             = (1UL << 12),
+  ALTER_ACL             = (1UL << 13),
+  SHOW_DB_ACL           = (1UL << 14),
+  SUPER_ACL             = (1UL << 15),
+  CREATE_TMP_ACL        = (1UL << 16),
+  LOCK_TABLES_ACL       = (1UL << 17),
+  EXECUTE_ACL           = (1UL << 18),
+  REPL_SLAVE_ACL        = (1UL << 19),
+  BINLOG_MONITOR_ACL    = (1UL << 20), // Was REPL_CLIENT_ACL prior to 10.5.2
+  CREATE_VIEW_ACL       = (1UL << 21),
+  SHOW_VIEW_ACL         = (1UL << 22),
+  CREATE_PROC_ACL       = (1UL << 23),
+  ALTER_PROC_ACL        = (1UL << 24),
+  CREATE_USER_ACL       = (1UL << 25),
+  EVENT_ACL             = (1UL << 26),
+  TRIGGER_ACL           = (1UL << 27),
+  CREATE_TABLESPACE_ACL = (1UL << 28),
+  DELETE_HISTORY_ACL    = (1UL << 29),  // Added in 10.3.4
+  SET_USER_ACL          = (1UL << 30),  // Added in 10.5.2
+  FEDERATED_ADMIN_ACL   = (1UL << 31),  // Added in 10.5.2
+  CONNECTION_ADMIN_ACL  = (1ULL << 32), // Added in 10.5.2
+  READ_ONLY_ADMIN_ACL   = (1ULL << 33), // Added in 10.5.2
+  REPL_SLAVE_ADMIN_ACL  = (1ULL << 34), // Added in 10.5.2
+  REPL_MASTER_ADMIN_ACL = (1ULL << 35), // Added in 10.5.2
+  BINLOG_ADMIN_ACL      = (1ULL << 36), // Added in 10.5.2
+  BINLOG_REPLAY_ACL     = (1ULL << 37), // Added in 10.5.2
+  SLAVE_MONITOR_ACL     = (1ULL << 38), // Added in 10.5.8
+  SHOW_CREATE_ROUTINE_ACL = (1ULL << 39)  // added in 11.3.0
+  /*
+    When adding new privilege bits, don't forget to update:
+    In this file:
+    - Add a new LAST_version_ACL
+    - Add a new ALL_KNOWN_ACL_version
+    - Change ALL_KNOWN_ACL to ALL_KNOWN_ACL_version
+    - Change GLOBAL_ACLS, DB_ACLS, TABLE_ACLS, PROC_ACLS if needed
+    - Change SUPER_ADDED_SINCE_USER_TABLE_ACL if needed
+
+    In other files:
+    - static struct show_privileges_st sys_privileges[]
+    - static const char *command_array[] and static uint command_lengths[]
+    - mariadb_system_tables.sql and mariadb_system_tables_fix.sql
+    - acl_init() or whatever - to define behaviour for old privilege tables
+    - Update User_table_json::get_access()
+    - sql_yacc.yy - for GRANT/REVOKE to work
+
+    Important: the enum should contain only single-bit values.
+    In this case, debuggers print bit combinations in the readable form:
+     (gdb) p (privilege_t) (15)
+     $8 = (SELECT_ACL | INSERT_ACL | UPDATE_ACL | DELETE_ACL)
+
+    Bit-OR combinations of the above values should be declared outside!
+  */
+};
+
+constexpr static inline privilege_t ALL_KNOWN_BITS(privilege_t x)
+{
+  return (privilege_t)(x | (x-1));
+}
+
+// Version markers
+constexpr privilege_t LAST_100304_ACL= DELETE_HISTORY_ACL;
+constexpr privilege_t LAST_100502_ACL= BINLOG_REPLAY_ACL;
+constexpr privilege_t LAST_100508_ACL= SLAVE_MONITOR_ACL;
+constexpr privilege_t LAST_110300_ACL= SHOW_CREATE_ROUTINE_ACL;
+
+// Current version markers
+constexpr privilege_t LAST_CURRENT_ACL= LAST_110300_ACL;
+constexpr uint PRIVILEGE_T_MAX_BIT=
+              my_bit_log2_uint64((ulonglong) LAST_CURRENT_ACL);
+
+static_assert((privilege_t)(1ULL << PRIVILEGE_T_MAX_BIT) == LAST_CURRENT_ACL,
+              "Something went fatally badly: "
+              "LAST_CURRENT_ACL and PRIVILEGE_T_MAX_BIT do not match");
+
+// A combination of all bits defined in 10.3.4 (and earlier)
+constexpr privilege_t ALL_KNOWN_ACL_100304 = ALL_KNOWN_BITS(LAST_100304_ACL);
+
+// A combination of all bits defined in 10.5.2
+constexpr privilege_t ALL_KNOWN_ACL_100502= ALL_KNOWN_BITS(LAST_100502_ACL);
+
+// A combination of all bits defined in 10.5.8
+constexpr privilege_t ALL_KNOWN_ACL_100508= ALL_KNOWN_BITS(LAST_100508_ACL);
+// unfortunately, SLAVE_MONITOR_ACL was added in 10.5.9, but also in 10.5.8-5
+// let's stay compatible with that branch too.
+constexpr privilege_t ALL_KNOWN_ACL_100509= ALL_KNOWN_ACL_100508;
+
+// A combination of all bits defined in 11.3.0
+constexpr privilege_t ALL_KNOWN_ACL_110300= ALL_KNOWN_BITS(LAST_110300_ACL);
+
+// A combination of all bits defined as of the current version
+constexpr privilege_t ALL_KNOWN_ACL= ALL_KNOWN_BITS(LAST_CURRENT_ACL);
+
+
+// Unary operators
+static inline constexpr ulonglong operator~(privilege_t access)
+{
+  return ~static_cast<ulonglong>(access);
+}
+
+/*
+  Comparison operators.
+  Delete automatic conversion between to/from integer types as much as possible.
+  This forces to use `(priv == NO_ACL)` instead of `(priv == 0)`.
+
+  Note: these operators will be gone when we change privilege_t to
+  "enum class privilege_t". See comments above.
+*/
+static inline bool operator==(privilege_t, ulonglong)= delete;
+static inline bool operator==(privilege_t,     ulong)= delete;
+static inline bool operator==(privilege_t,      uint)= delete;
+static inline bool operator==(privilege_t,     uchar)= delete;
+static inline bool operator==(privilege_t,  longlong)= delete;
+static inline bool operator==(privilege_t,      long)= delete;
+static inline bool operator==(privilege_t,       int)= delete;
+static inline bool operator==(privilege_t,      char)= delete;
+static inline bool operator==(privilege_t,      bool)= delete;
+
+static inline bool operator==(ulonglong, privilege_t)= delete;
+static inline bool operator==(ulong,     privilege_t)= delete;
+static inline bool operator==(uint,      privilege_t)= delete;
+static inline bool operator==(uchar,     privilege_t)= delete;
+static inline bool operator==(longlong,  privilege_t)= delete;
+static inline bool operator==(long,      privilege_t)= delete;
+static inline bool operator==(int,       privilege_t)= delete;
+static inline bool operator==(char,      privilege_t)= delete;
+static inline bool operator==(bool,      privilege_t)= delete;
+
+static inline bool operator!=(privilege_t, ulonglong)= delete;
+static inline bool operator!=(privilege_t,     ulong)= delete;
+static inline bool operator!=(privilege_t,      uint)= delete;
+static inline bool operator!=(privilege_t,     uchar)= delete;
+static inline bool operator!=(privilege_t,  longlong)= delete;
+static inline bool operator!=(privilege_t,      long)= delete;
+static inline bool operator!=(privilege_t,       int)= delete;
+static inline bool operator!=(privilege_t,      char)= delete;
+static inline bool operator!=(privilege_t,      bool)= delete;
+
+static inline bool operator!=(ulonglong, privilege_t)= delete;
+static inline bool operator!=(ulong,     privilege_t)= delete;
+static inline bool operator!=(uint,      privilege_t)= delete;
+static inline bool operator!=(uchar,     privilege_t)= delete;
+static inline bool operator!=(longlong,  privilege_t)= delete;
+static inline bool operator!=(long,      privilege_t)= delete;
+static inline bool operator!=(int,       privilege_t)= delete;
+static inline bool operator!=(char,      privilege_t)= delete;
+static inline bool operator!=(bool,      privilege_t)= delete;
+
+
+// Dyadic bitwise operators
+static inline constexpr privilege_t operator&(privilege_t a, privilege_t b)
+{
+  return static_cast<privilege_t>(static_cast<ulonglong>(a) &
+                                  static_cast<ulonglong>(b));
+}
+
+static inline constexpr privilege_t operator&(ulonglong a, privilege_t b)
+{
+  return static_cast<privilege_t>(a & static_cast<ulonglong>(b));
+}
+
+static inline constexpr privilege_t operator&(privilege_t a, ulonglong b)
+{
+  return static_cast<privilege_t>(static_cast<ulonglong>(a) & b);
+}
+
+static inline constexpr privilege_t operator|(privilege_t a, privilege_t b)
+{
+  return static_cast<privilege_t>(static_cast<ulonglong>(a) |
+                                  static_cast<ulonglong>(b));
+}
+
+
+// Dyadic bitwise assignment operators
+static inline privilege_t& operator&=(privilege_t &a, privilege_t b)
+{
+  return a= a & b;
+}
+
+static inline privilege_t& operator&=(privilege_t &a, ulonglong b)
+{
+  return a= a & b;
+}
+
+static inline privilege_t& operator|=(privilege_t &a, privilege_t b)
+{
+  return a= a | b;
+}
+
+/*
+  A combination of all privileges that SUPER used to allow before 10.11.0
+*/
+constexpr privilege_t ALLOWED_BY_SUPER_BEFORE_101100= READ_ONLY_ADMIN_ACL;
+
+/*
+  A combination of all privileges that SUPER used to allow before 11.0.0
+*/
+constexpr privilege_t ALLOWED_BY_SUPER_BEFORE_110000=
+  SET_USER_ACL |
+  FEDERATED_ADMIN_ACL |
+  CONNECTION_ADMIN_ACL |
+  REPL_SLAVE_ADMIN_ACL |
+  BINLOG_ADMIN_ACL |
+  BINLOG_REPLAY_ACL |
+  SLAVE_MONITOR_ACL |
+  BINLOG_MONITOR_ACL |
+  REPL_MASTER_ADMIN_ACL;
+
+constexpr privilege_t COL_DML_ACLS=
+  SELECT_ACL | INSERT_ACL | UPDATE_ACL | DELETE_ACL;
+
+constexpr privilege_t VIEW_ACLS=
+  CREATE_VIEW_ACL | SHOW_VIEW_ACL;
+
+constexpr privilege_t STD_TABLE_DDL_ACLS=
+  CREATE_ACL | DROP_ACL | ALTER_ACL;
+
+constexpr privilege_t ALL_TABLE_DDL_ACLS=
+  STD_TABLE_DDL_ACLS | INDEX_ACL;
+
+constexpr privilege_t COL_ACLS=
+  SELECT_ACL | INSERT_ACL | UPDATE_ACL | REFERENCES_ACL;
+
+constexpr privilege_t PROC_DDL_ACLS=
+  CREATE_PROC_ACL | ALTER_PROC_ACL;
+
+constexpr privilege_t SHOW_PROC_WITHOUT_DEFINITION_ACLS=
+  PROC_DDL_ACLS | EXECUTE_ACL;
+
+/*
+  When changing this, don't forget to update tables_priv
+  at scripts/mariadb_system_tables.sql, scripts/mariadb_system_tables_fix.sql
+  and scripts/sys_schema/i_s/table_privileges.sql
+*/
+constexpr privilege_t TABLE_ACLS=
+  COL_DML_ACLS | ALL_TABLE_DDL_ACLS | VIEW_ACLS |
+  GRANT_ACL | REFERENCES_ACL | 
+  TRIGGER_ACL | DELETE_HISTORY_ACL;
+
+constexpr privilege_t DB_ACLS=
+   TABLE_ACLS | PROC_DDL_ACLS | EXECUTE_ACL |
+   CREATE_TMP_ACL | LOCK_TABLES_ACL | EVENT_ACL | SHOW_CREATE_ROUTINE_ACL;
+
+constexpr privilege_t PROC_ACLS=
+  ALTER_PROC_ACL | EXECUTE_ACL | GRANT_ACL | SHOW_CREATE_ROUTINE_ACL;
+
+constexpr privilege_t GLOBAL_ACLS=
+  DB_ACLS | SHOW_DB_ACL | CREATE_USER_ACL | CREATE_TABLESPACE_ACL |
+  SUPER_ACL | RELOAD_ACL | SHUTDOWN_ACL | PROCESS_ACL | FILE_ACL |
+  REPL_SLAVE_ACL |
+  ALLOWED_BY_SUPER_BEFORE_101100 | ALLOWED_BY_SUPER_BEFORE_110000;
+
+constexpr privilege_t DEFAULT_CREATE_PROC_ACLS=
+  ALTER_PROC_ACL | EXECUTE_ACL;
+
+constexpr privilege_t SHOW_CREATE_TABLE_ACLS=
+  COL_DML_ACLS | ALL_TABLE_DDL_ACLS |
+  TRIGGER_ACL | REFERENCES_ACL | GRANT_ACL | VIEW_ACLS;
+
+/**
+  Table-level privileges which are automatically "granted" to everyone on
+  existing temporary tables (CREATE_ACL is necessary for ALTER ... RENAME).
+*/
+constexpr privilege_t TMP_TABLE_ACLS=
+  COL_DML_ACLS | ALL_TABLE_DDL_ACLS | REFERENCES_ACL;
+
+
+constexpr privilege_t PRIV_LOCK_TABLES= SELECT_ACL | LOCK_TABLES_ACL;
+
+/*
+  Allow to set an object definer:
+    CREATE DEFINER=xxx {TRIGGER|VIEW|FUNCTION|PROCEDURE}
+  Was SUPER prior to 10.5.2
+*/
+constexpr privilege_t PRIV_DEFINER_CLAUSE= SET_USER_ACL;
+/*
+  If a VIEW has a `definer=invoker@host` clause and
+  the specified definer does not exists, then
+  - The invoker with REVEAL_MISSING_DEFINER_ACL gets:
+    ERROR: The user specified as a definer ('definer1'@'localhost') doesn't exist
+  - The invoker without MISSING_DEFINER_ACL gets a generic access error,
+    without revealing details that the definer does not exists.
+
+  TODO: we should eventually test the same privilege when processing
+  other objects that have the DEFINER clause (e.g. routines, triggers).
+  Currently the missing definer is revealed for non-privileged invokers
+  in case of routines, triggers, etc.
+
+  Was SUPER prior to 10.5.2
+*/
+constexpr privilege_t PRIV_REVEAL_MISSING_DEFINER= SET_USER_ACL;
+
+constexpr privilege_t PRIV_SUDO_CHANGE_USER= SET_USER_ACL;
+
+/* Actions that require only the SUPER privilege */
+constexpr privilege_t PRIV_LOG_BIN_TRUSTED_SP_CREATOR= SUPER_ACL;
+constexpr privilege_t PRIV_DEBUG= SUPER_ACL;
+constexpr privilege_t PRIV_SET_GLOBAL_SYSTEM_VARIABLE= SUPER_ACL;
+constexpr privilege_t PRIV_SET_RESTRICTED_SESSION_SYSTEM_VARIABLE= SUPER_ACL;
+
+/* The following variables respected only SUPER_ACL prior to 10.5.2 */
+constexpr privilege_t PRIV_SET_SYSTEM_VAR_BINLOG_FORMAT=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_VAR_BINLOG_DIRECT_NON_TRANSACTIONAL_UPDATES=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_VAR_BINLOG_ANNOTATE_ROW_EVENTS=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_VAR_BINLOG_ROW_IMAGE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_VAR_SQL_LOG_BIN=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_CACHE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_FILE_CACHE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_STMT_CACHE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_COMMIT_WAIT_COUNT=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_COMMIT_WAIT_USEC=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_ROW_METADATA=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_LEGACY_EVENT_POS=
+  SUPER_ACL | BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_GTID_INDEX=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_GTID_INDEX_PAGE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_GTID_INDEX_SPAN_MIN=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_EXPIRE_LOGS_DAYS=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_LOG_BIN_COMPRESS=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_LOG_BIN_COMPRESS_MIN_LEN=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_LOG_BIN_TRUST_FUNCTION_CREATORS=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_BINLOG_CACHE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_BINLOG_STMT_CACHE_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_BINLOG_SIZE=
+  BINLOG_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SYNC_BINLOG=
+  BINLOG_ADMIN_ACL;
+
+
+/* Privileges related to --read-only */
+// Was super prior to 10.5.2
+constexpr privilege_t PRIV_IGNORE_READ_ONLY= READ_ONLY_ADMIN_ACL;
+// Was super prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_READ_ONLY= READ_ONLY_ADMIN_ACL;
+
+/*
+  Privileges related to connection handling.
+*/
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_IGNORE_INIT_CONNECT= CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_IGNORE_MAX_USER_CONNECTIONS= CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_IGNORE_MAX_CONNECTIONS= CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_IGNORE_MAX_PASSWORD_ERRORS= CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_KILL_OTHER_USER_PROCESS= CONNECTION_ADMIN_ACL;
+
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_CONNECT_TIMEOUT=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_DISCONNECT_ON_EXPIRED_PASSWORD=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_EXTRA_MAX_CONNECTIONS=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_INIT_CONNECT=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_CONNECTIONS=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_CONNECT_ERRORS=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MAX_PASSWORD_ERRORS=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_PROXY_PROTOCOL_NETWORKS=
+  CONNECTION_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLOW_LAUNCH_TIME=
+  CONNECTION_ADMIN_ACL;
+
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_THREAD_POOL=
+  CONNECTION_ADMIN_ACL;
+
+
+/*
+  Binary log related privileges that are checked regardless
+  of active replication running.
+*/
+
+/*
+  This command was renamed from "SHOW MASTER STATUS"
+  to "SHOW BINLOG STATUS" in 10.5.2.
+  Was SUPER_ACL | REPL_CLIENT_ACL prior to 10.5.2
+  REPL_CLIENT_ACL was renamed to BINLOG_MONITOR_ACL.
+*/
+constexpr privilege_t PRIV_STMT_SHOW_BINLOG_STATUS= BINLOG_MONITOR_ACL;
+
+/*
+  Was SUPER_ACL | REPL_CLIENT_ACL prior to 10.5.2
+  REPL_CLIENT_ACL was renamed to BINLOG_MONITOR_ACL.
+*/
+constexpr privilege_t PRIV_STMT_SHOW_BINARY_LOGS= BINLOG_MONITOR_ACL;
+
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_PURGE_BINLOG= BINLOG_ADMIN_ACL;
+
+// Was REPL_SLAVE_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_SHOW_BINLOG_EVENTS= BINLOG_MONITOR_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_DO_DB = BINLOG_ADMIN_ACL | SUPER_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_BINLOG_IGNORE_DB = BINLOG_ADMIN_ACL | SUPER_ACL;
+
+/*
+  Privileges for replication related statements and commands
+  that are executed on the master.
+*/
+constexpr privilege_t PRIV_COM_REGISTER_SLAVE= REPL_SLAVE_ACL;
+constexpr privilege_t PRIV_COM_BINLOG_DUMP= REPL_SLAVE_ACL;
+// Was REPL_SLAVE_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_SHOW_SLAVE_HOSTS= REPL_MASTER_ADMIN_ACL;
+
+/*
+  Replication master related variable privileges.
+  Where SUPER prior to 10.5.2
+*/
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_MASTER_ENABLED=
+  REPL_MASTER_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_MASTER_TIMEOUT=
+  REPL_MASTER_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_MASTER_WAIT_NO_SLAVE=
+  REPL_MASTER_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_MASTER_TRACE_LEVEL=
+  REPL_MASTER_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_MASTER_WAIT_POINT=
+  REPL_MASTER_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_MASTER_VERIFY_CHECKSUM=
+  REPL_MASTER_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_BINLOG_STATE=
+  REPL_MASTER_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SERVER_ID=
+  REPL_MASTER_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_DOMAIN_ID=
+  REPL_MASTER_ADMIN_ACL;
+
+
+/* Privileges for statements that are executed on the slave */
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_START_SLAVE= REPL_SLAVE_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_STOP_SLAVE= REPL_SLAVE_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_CHANGE_MASTER= REPL_SLAVE_ADMIN_ACL;
+// Was (SUPER_ACL | REPL_CLIENT_ACL) prior to 10.5.2
+// Was (SUPER_ACL | REPL_SLAVE_ADMIN_ACL) from 10.5.2 to 10.5.7
+constexpr privilege_t PRIV_STMT_SHOW_SLAVE_STATUS= SLAVE_MONITOR_ACL;
+// Was REPL_SLAVE_ACL prior to 10.5.2
+// Was REPL_SLAVE_ADMIN_ACL from 10.5.2 to 10.5.7
+constexpr privilege_t PRIV_STMT_SHOW_RELAYLOG_EVENTS= SLAVE_MONITOR_ACL;
+
+/*
+  Privileges related to binlog replying.
+  Were SUPER_ACL prior to 10.5.2
+*/
+constexpr privilege_t PRIV_STMT_BINLOG= BINLOG_REPLAY_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_SESSION_VAR_GTID_SEQ_NO=
+  BINLOG_REPLAY_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_SESSION_VAR_PSEUDO_THREAD_ID=
+  BINLOG_REPLAY_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_SESSION_VAR_SERVER_ID=
+  BINLOG_REPLAY_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_SESSION_VAR_GTID_DOMAIN_ID=
+  BINLOG_REPLAY_ACL;
+
+/*
+  Privileges for slave related global variables.
+  Were SUPER prior to 10.5.2.
+*/
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_EVENTS_MARKED_FOR_SKIP=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_REWRITE_DB=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_DO_DB=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_DO_TABLE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_IGNORE_DB=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_IGNORE_TABLE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_WILD_DO_TABLE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_REPLICATE_WILD_IGNORE_TABLE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_READ_BINLOG_SPEED_LIMIT=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_COMPRESSED_PROTOCOL=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_DDL_EXEC_MODE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_DOMAIN_PARALLEL_THREADS=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_EXEC_MODE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_MAX_ALLOWED_PACKET=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_MAX_STATEMENT_TIME=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_ABORT_BLOCKING_TIMEOUT=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_NET_TIMEOUT=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_PARALLEL_MAX_QUEUED=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_PARALLEL_MODE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_PARALLEL_THREADS=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_PARALLEL_WORKERS=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_RUN_TRIGGERS_FOR_RBR=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_SQL_VERIFY_CHECKSUM=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_TRANSACTION_RETRY_INTERVAL=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SLAVE_TYPE_CONVERSIONS=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_INIT_SLAVE=
+  REPL_SLAVE_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_SLAVE_ENABLED=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_SLAVE_TRACE_LEVEL=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_SLAVE_DELAY_MASTER=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RPL_SEMI_SYNC_SLAVE_KILL_CONN_TIMEOUT=
+  REPL_SLAVE_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RELAY_LOG_PURGE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_RELAY_LOG_RECOVERY=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SYNC_MASTER_INFO=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SYNC_RELAY_LOG=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_SYNC_RELAY_LOG_INFO=
+  REPL_SLAVE_ADMIN_ACL;
+
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_CLEANUP_BATCH_SIZE=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_IGNORE_DUPLICATES=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_POS_AUTO_ENGINES=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_SLAVE_POS=
+  REPL_SLAVE_ADMIN_ACL;
+constexpr privilege_t PRIV_SET_SYSTEM_GLOBAL_VAR_GTID_STRICT_MODE=
+  REPL_SLAVE_ADMIN_ACL;
+
+
+/* Privileges for federated database related statements */
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_CREATE_SERVER= FEDERATED_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_ALTER_SERVER= FEDERATED_ADMIN_ACL;
+// Was SUPER_ACL prior to 10.5.2
+constexpr privilege_t PRIV_STMT_DROP_SERVER= FEDERATED_ADMIN_ACL;
+constexpr privilege_t PRIV_STMT_SHOW_CREATE_SERVER= FEDERATED_ADMIN_ACL;
+
+
+/* Privileges related to processes */
+constexpr privilege_t PRIV_STMT_SHOW_ENGINE_STATUS= PROCESS_ACL;
+constexpr privilege_t PRIV_STMT_SHOW_ENGINE_MUTEX= PROCESS_ACL;
+// This privilege is used in thd_visible_in_processlist() and thus applies
+// to SHOW PROCESSLIST, I_S.PROCESSLIST, SHOW EXPLAIN and SHOW ANALYZE
+constexpr privilege_t PRIV_STMT_SHOW_PROCESSLIST= PROCESS_ACL;
+
+
+/*
+  access_t represents effective privileges at a given scope.
+
+  It bundles:
+    - allow bits (positive grants at this scope)
+    - deny bits (explicit DENY at this scope)
+    - deny_subtree (summary of DENY from lower scopes, used for fast checks)
+
+  access_t is what privilege checks cache and combine (roles, parents, etc.)
+  to decide whether a requested privilege is allowed, denied, or unknown.
+*/
+class access_t
+{
+private:
+  privilege_t m_allow_bits;
+  privilege_t m_deny_bits;
+  privilege_t m_deny_subtree;
+
+public:
+  explicit access_t(privilege_t allow, privilege_t deny= NO_ACL,
+           privilege_t deny_subtree= NO_ACL)
+      : m_allow_bits(allow), m_deny_bits(deny), m_deny_subtree(deny_subtree)
+  {
+  }
+  /* True if no allow/deny information is present. */
+  bool is_empty() const
+  {
+    return m_allow_bits == NO_ACL && m_deny_bits == NO_ACL &&
+           m_deny_subtree == NO_ACL;
+  }
+  void set_deny_bits(privilege_t deny) { m_deny_bits= deny; }
+  /* Set explicit denies and subtree denies in one shot. */
+  void set_deny(privilege_t deny, privilege_t deny_subtree)
+  {
+    m_deny_bits= deny;
+    m_deny_subtree= deny_subtree;
+  }
+  /* Set subtree deny summary (denies from lower scopes). */
+  void set_deny_subtree(privilege_t deny_subtree)
+  {
+    m_deny_subtree= deny_subtree;
+  }
+  /* Replace allow bits at this scope. */
+  void set_allow_bits(privilege_t allow)
+  {
+    m_allow_bits= allow;
+  }
+
+  /* Force allow bits; optionally clear matching denies at this scope. */
+  void force_allow(privilege_t bits, bool overwrite_deny=false)
+  {
+    m_allow_bits|= bits;
+    if (overwrite_deny)
+      m_deny_bits&= ~bits ;
+  }
+
+  /*
+    Disallow implicit conversions from privilege
+    (potential source of bugs)
+  */
+  access_t &operator=(const privilege_t &)= delete;
+
+  /*
+    Merge another access_t into this one (bitwise OR of all components).
+    Used for: accumulating privileges from multiple roles, or from PUBLIC +
+    user, etc.
+  */
+  access_t &merge_same_level(const access_t &other)
+  {
+    m_allow_bits= privilege_t(m_allow_bits | other.m_allow_bits);
+    m_deny_bits= privilege_t(m_deny_bits | other.m_deny_bits);
+    m_deny_subtree= privilege_t(m_deny_subtree | other.m_deny_subtree);
+    return *this;
+  }
+
+  access_t &operator|=(const access_t &)= delete;
+
+  /*
+    Intersect allow bits; keep union of denies and subtree denies.
+    Used for: intersecting access from db and host.
+  */
+  access_t intersect(const access_t &other) const
+  {
+    return access_t((privilege_t) (m_allow_bits & other.m_allow_bits),
+                    (privilege_t) (m_deny_bits | other.m_deny_bits),
+                    (privilege_t) (m_deny_subtree | other.m_deny_subtree));
+  }
+
+  /*
+    Combine child-level access with parent-level access (vertical hierarchy).
+    Used for: global -> database -> table -> column traversal
+
+    Rules:
+    - Allow bits accumulate (union), but an explicit deny always wins over an allow.
+    - Deny bits accumulate (once denied at any scope, always denied).
+    - deny_subtree is taken from *this* (the child), not from the parent.
+    The difference between this and merge_same_level() is the handling of
+    deny_subtree. merge_same_level() is for same-level access for user+role+PUBLIC,
+    while this one is hierarchical, used when going from global to db etc until
+    column level. If merged correctly, on the "leaf level" of hierarchy,
+    the deny_subtree should always be zero.
+  */
+  access_t &merge_with_parent(const access_t &parent)
+  {
+    m_allow_bits= privilege_t(m_allow_bits | parent.m_allow_bits);
+    m_deny_bits= privilege_t(m_deny_bits | parent.m_deny_bits);
+    /* Keep current deny_subtree (child scope). */
+    return *this;
+  }
+
+  friend bool operator==(const access_t &x, const access_t &y)
+  {
+    return x.m_allow_bits == y.m_allow_bits &&
+           x.m_deny_bits == y.m_deny_bits &&
+           x.m_deny_subtree == y.m_deny_subtree;
+  }
+  friend bool operator!=(const access_t &x, const access_t &y)
+  {
+    return !(x == y);
+  }
+  /* Bitwise OR merge is intentionally avoided for access_t. */
+
+  /* Return bits that are granted and not denied here or below. */
+  privilege_t certainly_allowed(privilege_t priv) const
+  {
+    return (privilege_t) (priv & m_allow_bits & ~m_deny_bits &
+                          ~m_deny_subtree);
+  }
+
+  /* Used for quick checks in USE db / SHOW */
+  privilege_t maybe_allowed(privilege_t priv) const
+  {
+    return (privilege_t) (priv & m_allow_bits & ~m_deny_bits);
+  }
+
+  /*
+     Intersect with a privilege mask.
+     deny bits are "sticky", i.e. won't be cleared by
+     frequently used "priv &=~ access" patterns
+  */
+  friend privilege_t operator&(const access_t &x, const privilege_t &y)
+  {
+    return x.certainly_allowed(y);
+  }
+
+  /*
+    Complement of certainly_allowed across all known privilege bits.
+    Used in popular "want_privilege &=~ access" pattern to clear known
+    allowed bits.
+  */
+  ulonglong operator~() const { return ~certainly_allowed(ALL_KNOWN_ACL); };
+
+  /* Return bits that are requested and denied. */
+  privilege_t denied_privs(privilege_t priv) const
+  {
+    return (privilege_t) (m_deny_bits & priv);
+  }
+
+  /* Raw accessors. */
+  privilege_t allow_bits() const { return m_allow_bits; }
+  privilege_t deny_bits() const { return m_deny_bits; }
+  privilege_t deny_subtree() const { return m_deny_subtree; }
+};
+
+inline access_t merge_same_level(const access_t& first, const access_t& second)
+{
+  access_t res(first);
+  return res.merge_same_level(second);
+}
+
+inline access_t merge_same_level(const access_t &first, const access_t &second,
+                                 const access_t& third)
+{
+  return merge_same_level(first, merge_same_level(second,third));
+}
+
+inline access_t merge_with_parent(const access_t &child, const access_t &parent)
+{
+  access_t res(child);
+  res.merge_with_parent(parent);
+  return res;
+}
+
+
+/*
+  Defines to change the above bits to how things are stored in tables
+  This is needed as the 'host' and 'db' table is missing a few privileges
+*/
+
+/* Privileges that need to be reallocated (in continous chunks) */
+constexpr privilege_t DB_CHUNK0 (COL_DML_ACLS | CREATE_ACL | DROP_ACL);
+constexpr privilege_t DB_CHUNK1 (GRANT_ACL | REFERENCES_ACL | INDEX_ACL | ALTER_ACL);
+constexpr privilege_t DB_CHUNK2 (CREATE_TMP_ACL | LOCK_TABLES_ACL);
+constexpr privilege_t DB_CHUNK3 (VIEW_ACLS | PROC_DDL_ACLS);
+constexpr privilege_t DB_CHUNK4 (EXECUTE_ACL);
+constexpr privilege_t DB_CHUNK5 (EVENT_ACL | TRIGGER_ACL);
+constexpr privilege_t DB_CHUNK6 (DELETE_HISTORY_ACL);
+constexpr privilege_t DB_CHUNK7 (SHOW_CREATE_ROUTINE_ACL);
+
+
+static inline privilege_t fix_rights_for_db(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           (((A)      & DB_CHUNK0) |
+            ((A << 4) & DB_CHUNK1) |
+            ((A << 6) & DB_CHUNK2) |
+            ((A << 9) & DB_CHUNK3) |
+            ((A << 2) & DB_CHUNK4) |
+            ((A << 9) & DB_CHUNK5) |
+            ((A << 10) & DB_CHUNK6) |
+            ((A << 19) & DB_CHUNK7));
+}
+
+static inline privilege_t get_rights_for_db(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           ((A & DB_CHUNK0)       |
+           ((A & DB_CHUNK1) >> 4) |
+           ((A & DB_CHUNK2) >> 6) |
+           ((A & DB_CHUNK3) >> 9) |
+           ((A & DB_CHUNK4) >> 2) |
+           ((A & DB_CHUNK5) >> 9) |
+           ((A & DB_CHUNK6) >> 10) |
+           ((A & DB_CHUNK7) >> 19));
+}
+
+
+#define TBL_CHUNK0 DB_CHUNK0
+#define TBL_CHUNK1 DB_CHUNK1
+#define TBL_CHUNK2 (CREATE_VIEW_ACL | SHOW_VIEW_ACL)
+#define TBL_CHUNK3 TRIGGER_ACL
+#define TBL_CHUNK4 (DELETE_HISTORY_ACL)
+
+
+static inline privilege_t fix_rights_for_table(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           ((A        & TBL_CHUNK0) |
+           ((A <<  4) & TBL_CHUNK1) |
+           ((A << 11) & TBL_CHUNK2) |
+           ((A << 15) & TBL_CHUNK3) |
+           ((A << 16) & TBL_CHUNK4));
+}
+
+
+static inline privilege_t get_rights_for_table(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           ((A & TBL_CHUNK0)        |
+           ((A & TBL_CHUNK1) >>  4) |
+           ((A & TBL_CHUNK2) >> 11) |
+           ((A & TBL_CHUNK3) >> 15) |
+           ((A & TBL_CHUNK4) >> 16));
+}
+
+
+static inline privilege_t fix_rights_for_column(privilege_t A)
+{
+  const ulonglong mask(SELECT_ACL | INSERT_ACL | UPDATE_ACL);
+  return (A & mask) | static_cast<privilege_t>((A & ~mask) << 8);
+}
+
+
+static inline privilege_t get_rights_for_column(privilege_t A)
+{
+  const ulonglong mask(SELECT_ACL | INSERT_ACL | UPDATE_ACL);
+  return static_cast<privilege_t>((static_cast<ulonglong>(A) & mask) |
+                                  (static_cast<ulonglong>(A) >> 8));
+}
+
+
+static inline privilege_t fix_rights_for_procedure(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           (((A << 35) & SHOW_CREATE_ROUTINE_ACL) |
+            ((A << 18) & EXECUTE_ACL)             |
+            ((A << 23) & ALTER_PROC_ACL)          |
+            ((A << 8)  & GRANT_ACL));
+}
+
+
+static inline privilege_t get_rights_for_procedure(privilege_t access)
+{
+  ulonglong A(access);
+  return static_cast<privilege_t>
+           (((A & SHOW_CREATE_ROUTINE_ACL) >> 35) |
+            ((A & EXECUTE_ACL)             >> 18) |
+            ((A & ALTER_PROC_ACL)          >> 23) |
+            ((A & GRANT_ACL)               >> 8));
+}
+
+
+#endif /* PRIVILEGE_H_INCLUDED */
